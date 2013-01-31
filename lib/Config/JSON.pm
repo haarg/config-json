@@ -5,6 +5,8 @@ use File::Spec;
 use JSON 2.0;
 use List::Util;
 use Carp;
+use File::Temp;
+use File::Basename;
 use namespace::clean;
 
 use constant FILE_HEADER    => "# config-file-type: JSON 1\n";
@@ -292,30 +294,21 @@ sub write {
     my $content = $json->encode($self->config);
 
     my $to_write = FILE_HEADER . "\n" . $json;
-    my $needed_bytes = length $to_write;
 
-    # open as read/write
-    open my $fh, '+<:raw', $realfile or confess "Unable to open $realfile for write: $!";
-    my $current_bytes = (stat $fh)[7];
-    # shrink file if needed
-    if ($needed_bytes < $current_bytes) {
-        truncate $fh, $needed_bytes;
+    my ($mode, $uid, $gid) = (stat $realfile)[2,4,5];
+    my $new_file = File::Temp->new(UNLINK => 0, DIR => dirname($realfile));
+    print { $new_file } $to_write
+        or croak "Unable to write new config file: $!";
+    close $new_file
+        or croak "Unable to write new config file: $!";
+
+    # these can fail but that's ok
+    chown $uid, $gid, $new_file;
+    chmod $mode, $new_file;
+    if (!rename $new_file, $realfile) {
+        unlink $new_file;
+        croak "Unable to replace config file: $!";
     }
-    # make sure we can expand the file to the needed size before we overwrite it
-    elsif ($needed_bytes > $current_bytes) {
-        my $padding = q{ } x ($needed_bytes - $current_bytes);
-        sysseek $fh, 0, 2;
-        if (! syswrite $fh, $padding) {
-            sysseek $fh, 0, 0;
-            truncate $fh, $current_bytes;
-            close $fh;
-            confess "Unable to expand $realfile: $!";
-        }
-        sysseek $fh, 0, 0;
-        seek $fh, 0, 0;
-    }
-    print {$fh} $to_write;
-    close $fh;
 
     return 1;
 }
