@@ -1,17 +1,36 @@
 package Config::JSON;
 
-use Moose;
+use Moo;
 use File::Spec;
 use JSON 2.0;
 use List::Util;
+use Carp;
+use namespace::clean;
 
 use constant FILE_HEADER    => "# config-file-type: JSON 1\n";
 
 #-------------------------------------------------------------------
-has config => (
-    is => 'rw',
-    default => sub {{}},
-);
+has config => ( is => 'lazy' );
+
+my $json = JSON->new->relaxed->pretty->canonical->utf8;
+
+sub _build_config {
+    my $self = shift;
+    if (my $path = $self->pathToFile) {
+        open my $fh, '<', $path
+            or confess "Cannot read config file $path: $!";
+        my $content = do { local $/; <$fh> };
+        close $fh;
+
+        my $conf = $json->decode($content);
+
+        return $conf;
+
+    }
+    else {
+        return {};
+    }
+}
 
 #-------------------------------------------------------------------
 sub getFilePath {
@@ -21,31 +40,8 @@ sub getFilePath {
 
 #-------------------------------------------------------------------
 has pathToFile => (
-   is       => 'ro',
-   required => 1,
-   trigger  => sub {
-        my ($self, $pathToFile, $old) = @_;
-        if (open(my $FILE, "<", $pathToFile)) {
-            # slurp
-            local $/ = undef;
-            my $json = <$FILE>;
-            close($FILE);
-            my $conf = eval { JSON->new->relaxed->utf8->decode($json); };
-            confess "Couldn't parse JSON in config file '$pathToFile'\n" unless ref $conf;
-            $self->config($conf);
-		
-		    # process includes
-		    my @includes = map { glob $_ } @{ $self->get('includes') || [] };
-            my @loadedIncludes;
-	    	foreach my $include (@includes) {
-			    push @loadedIncludes,  __PACKAGE__->new(pathToFile=>$include, isInclude=>1);
-	    	}
-            $self->includes(\@loadedIncludes);
-        } 
-        else {
-            confess "Cannot read config file: ".$pathToFile;
-        }
-    },
+    is       => 'ro',
+    required => 1,
 );
 
 #-------------------------------------------------------------------
@@ -55,16 +51,24 @@ has isInclude => (
 );
 
 #-------------------------------------------------------------------
-has includes => (
-    is => 'rw',
-    default => sub {[]},
-);
+has includes => ( is => 'lazy' );
+
+sub _build_includes {
+    my $self = shift;
+
+    my $class = ref $self;
+    my @includes =
+        map { $class->new(pathToFile => $_, isInclude => 1) }
+        sort
+        grep { !-d }
+        map { glob $_ }
+        @{ $self->get('includes') || [] };
+
+    return \@includes;
+}
 
 #-------------------------------------------------------------------
-sub getIncludes {
-    my $self = shift;
-    return $self->includes;
-}
+sub getIncludes { $_[0]->includes }
 
 #-------------------------------------------------------------------
 around BUILDARGS => sub {
@@ -129,15 +133,10 @@ sub addToHash {
 
 #-------------------------------------------------------------------
 sub create {
-	my ($class, $filename) = @_;
-    if (open(my $FILE,">",$filename)) {
-        print $FILE FILE_HEADER."\n{ }\n";
-        close($FILE);
-    } 
-    else {
-        warn "Can't write to config file ".$filename;
-    }
-	return $class->new(pathToFile=>$filename);	
+    my ($class, $filename) = @_;
+    my $self = $class->new(pathToFile => $filename, config => {});
+    $self->write;
+    return $self;
 }
 
 #-------------------------------------------------------------------
@@ -290,7 +289,7 @@ sub write {
     my $realfile = $self->pathToFile;
 
     # convert data to json
-    my $json = JSON->new->pretty->utf8->canonical->encode($self->config);
+    my $content = $json->encode($self->config);
 
     my $to_write = FILE_HEADER . "\n" . $json;
     my $needed_bytes = length $to_write;
@@ -656,6 +655,3 @@ JT Smith  <jt-at-plainblack-dot-com>
 Config::JSON is Copyright 2009 Plain Black Corporation (L<http://www.plainblack.com/>) and is licensed under the same terms as Perl itself.
 
 =cut
-
-no Moose;
-__PACKAGE__->meta->make_immutable;
